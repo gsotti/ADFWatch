@@ -1,4 +1,4 @@
-# ScanServer
+# ADFWatch
 
 Automated document scanner service that monitors a network scanner's ADF (Automatic Document Feeder) and creates PDFs from scanned documents.
 
@@ -172,7 +172,7 @@ If automatic discovery fails:
 ### Viewing Logs
 
 ```bash
-docker-compose logs -f scanserver
+docker-compose logs -f adfwatch
 ```
 
 Set `LOG_LEVEL=debug` for detailed diagnostics.
