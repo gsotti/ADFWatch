@@ -8,26 +8,23 @@ SCAN_RESOLUTION="${SCAN_RESOLUTION:-300}"
 SCAN_MODE="${SCAN_MODE:-Color}"
 OUTPUT_DIR="${OUTPUT_DIR:-/scans}"
 BLANK_THRESHOLD="${BLANK_THRESHOLD:-0.005}"
-DUPLEX_MODE="${DUPLEX_MODE:-false}"
 DUPLEX_FLIP_DELAY="${DUPLEX_FLIP_DELAY:-10}"
+SCAN_TIMEOUT="${SCAN_TIMEOUT:-30}"
 SCANNER_NAME="${SCANNER_NAME:-My Scanner}"
 SCAN_SOURCE="${SCAN_SOURCE:-}"
 SCAN_DEVICE="${SCAN_DEVICE:-}"
-SCAN_EXTRA_OPTS="${SCAN_EXTRA_OPTS:-}"
 WORK_DIR="/tmp/adfwatch"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 ESCL_BASE="http://${SCANNER_IP}/eSCL"
-DUPLEX_OPTION=""
-MANUAL_DUPLEX=false
 
 # Upload configuration
 UPLOAD_ENABLED="${UPLOAD_ENABLED:-false}"
-UPLOAD_PROTOCOL="${UPLOAD_PROTOCOL:-sftp}"  # ftp, ftps, or sftp
+UPLOAD_PROTOCOL="${UPLOAD_PROTOCOL:-sftp}"  # ftp, ftps, sftp, or smb
 UPLOAD_HOST="${UPLOAD_HOST:-}"
 UPLOAD_PORT="${UPLOAD_PORT:-}"  # Auto-set based on protocol if not specified
 UPLOAD_USER="${UPLOAD_USER:-}"
 UPLOAD_PASSWORD="${UPLOAD_PASSWORD:-}"
-UPLOAD_PATH="${UPLOAD_PATH:-/}"
+UPLOAD_PATH="${UPLOAD_PATH:-/}"  # For SMB: //server/share/path or just share name
 UPLOAD_DELETE_AFTER="${UPLOAD_DELETE_AFTER:-false}"
 
 # Log levels mapping
@@ -58,53 +55,28 @@ initialize_scanner() {
     local scanner_help
     scanner_help=$(scanimage -d "${SCAN_DEVICE}" --help 2>&1)
 
-    # Auto-detect scan source
+    # Auto-detect scan source if not manually set
     if [[ -z "${SCAN_SOURCE}" ]]; then
-        local available_sources
-        available_sources=$(echo "${scanner_help}" | grep -A 30 "^\s*--source" | grep -E "^\s+" | sed 's/^[[:space:]]*//' || true)
+        SCAN_SOURCE="ADF"  # Default value
 
-        if [[ "${DUPLEX_MODE}" == "true" ]]; then
-            local duplex_source
-            duplex_source=$(echo "${available_sources}" | grep -i "duplex" | head -n1 || true)
-            if [[ -n "${duplex_source}" ]]; then
-                SCAN_SOURCE=$(echo "${duplex_source}" | cut -d'|' -f1 | xargs)
-            else
-                SCAN_SOURCE="ADF"
-            fi
+        # Try to detect ADF source from scanner capabilities
+        local adf_source
+        adf_source=$(echo "${scanner_help}" | grep -A 20 "^\s*--source" | grep -i "adf" | head -n1 | sed 's/^[[:space:]]*//' | sed 's/[[:space:]].*//' || true)
+
+        if [[ -n "${adf_source}" ]] && [[ "${adf_source}" != "--source" ]]; then
+            SCAN_SOURCE="${adf_source}"
+            log debug "Detected ADF source: ${SCAN_SOURCE}"
         else
-            local adf_source
-            adf_source=$(echo "${available_sources}" | grep -i "adf" | grep -iv "duplex" | head -n1 || true)
-            if [[ -n "${adf_source}" ]]; then
-                SCAN_SOURCE=$(echo "${adf_source}" | cut -d'|' -f1 | xargs)
-            else
-                SCAN_SOURCE="ADF"
-            fi
+            log debug "Using default source: ${SCAN_SOURCE}"
         fi
     fi
 
-    # Detect duplex option if duplex mode requested
-    if [[ "${DUPLEX_MODE}" == "true" ]]; then
-        if echo "${scanner_help}" | grep -q "^\s*--duplex"; then
-            if echo "${scanner_help}" | grep -A 2 "^\s*--duplex" | grep -qi "yes\|on\|true"; then
-                DUPLEX_OPTION="--duplex=yes"
-            elif echo "${scanner_help}" | grep -A 2 "^\s*--duplex" | grep -qi "\[=(yes|no)\]"; then
-                DUPLEX_OPTION="--duplex"
-            fi
-        elif echo "${scanner_help}" | grep -qi "^\s*--adf-mode.*duplex"; then
-            DUPLEX_OPTION="--adf-mode=Duplex"
+    # Wait for scanner to be reachable (max 60s)
+    for attempt in {1..12}; do
+        if curl --connect-timeout 5 --max-time 10 -s "${ESCL_BASE}/ScannerStatus" >/dev/null 2>&1; then
+            break
         fi
-
-        if [[ -z "${DUPLEX_OPTION}" ]]; then
-            log warn "No automatic duplex option found, using manual duplex (flip delay: ${DUPLEX_FLIP_DELAY}s)"
-            MANUAL_DUPLEX=true
-        fi
-    fi
-
-    # Wait for scanner to be reachable
-    local attempt=0
-    while ! curl --connect-timeout 5 --max-time 10 -s "${ESCL_BASE}/ScannerStatus" >/dev/null 2>&1; do
-        attempt=$((attempt + 1))
-        if [[ ${attempt} -ge 12 ]]; then
+        if [[ ${attempt} -eq 12 ]]; then
             log error "Scanner not reachable at ${ESCL_BASE} after 60s"
             exit 1
         fi
@@ -116,6 +88,8 @@ initialize_scanner() {
 }
 
 # Check ADF status via eSCL
+# Returns: 0 = documents loaded, 1 = empty, 2 = error
+# Sets global ADF_ERROR_STATE for error details
 check_adf() {
     local status_xml
     if ! status_xml=$(curl --connect-timeout 5 --max-time 10 -s "${ESCL_BASE}/ScannerStatus" 2>&1); then
@@ -136,7 +110,7 @@ check_adf() {
 
     if [[ "${adf_state}" == *"Jam"* ]] || [[ "${adf_state}" == *"Mispick"* ]] || \
        [[ "${adf_state}" == *"HatchOpen"* ]] || [[ "${adf_state}" == *"Error"* ]]; then
-        log error "ADF error: ${adf_state}"
+        ADF_ERROR_STATE="${adf_state}"
         return 2
     fi
 
@@ -148,20 +122,11 @@ do_scan_simple() {
     local scan_dir="$1"
     local batch_prefix="$2"
 
-    local scan_cmd="scanimage -d \"${SCAN_DEVICE}\" --source \"${SCAN_SOURCE}\" --mode \"${SCAN_MODE}\" --resolution \"${SCAN_RESOLUTION}\""
-
-    if [[ -n "${DUPLEX_OPTION}" ]]; then
-        scan_cmd="${scan_cmd} ${DUPLEX_OPTION}"
-    fi
-
-    if [[ -n "${SCAN_EXTRA_OPTS}" ]]; then
-        scan_cmd="${scan_cmd} ${SCAN_EXTRA_OPTS}"
-    fi
-
-    scan_cmd="${scan_cmd} --batch=\"${scan_dir}/${batch_prefix}-%04d.pnm\" --batch-start=1 --format=pnm"
+    local scan_cmd="scanimage -d \"${SCAN_DEVICE}\" --source \"${SCAN_SOURCE}\" --mode \"${SCAN_MODE}\" --resolution \"${SCAN_RESOLUTION}\" --batch=\"${scan_dir}/${batch_prefix}-%04d.pnm\" --batch-start=1 --format=pnm"
 
     log debug "Scan command: ${scan_cmd}"
 
+    # Run scan synchronously (let scanimage decide when to stop)
     set +e
     local scan_output
     scan_output=$(eval "${scan_cmd}" 2>&1)
@@ -169,9 +134,7 @@ do_scan_simple() {
 
     log debug "Scanner output: ${scan_output}"
 
-    local page_count
-    page_count=$(find "${scan_dir}" -name "${batch_prefix}-*.pnm" 2>/dev/null | wc -l)
-
+    local page_count=$(find "${scan_dir}" -name "${batch_prefix}-*.pnm" 2>/dev/null | wc -l)
     log info "Scanned ${page_count} page(s)"
     echo "${page_count}"
 }
@@ -185,20 +148,28 @@ do_scan_manual_duplex() {
     fronts_count=$(do_scan_simple "${scan_dir}" "front")
 
     if [[ ${fronts_count} -eq 0 ]]; then
-        log error "No front pages scanned"
-        return 1
+        log warn "No front pages scanned (timeout or empty ADF)"
+        return 0
     fi
 
-    log info "Flip the stack and reload into ADF. Waiting ${DUPLEX_FLIP_DELAY}s..."
+    log info "Front scanning complete (${fronts_count} pages)"
+    log info "Flip the stack and reload into ADF within ${DUPLEX_FLIP_DELAY}s to scan backs, or wait to save fronts only..."
     sleep "${DUPLEX_FLIP_DELAY}"
 
-    log info "Scanning backs..."
+    log info "Checking for backs..."
     local backs_count
     backs_count=$(do_scan_simple "${scan_dir}" "back")
 
     if [[ ${backs_count} -eq 0 ]]; then
-        log error "No back pages scanned"
-        return 1
+        log warn "No back pages scanned, saving document with fronts only"
+        # Just rename front pages to final page numbers
+        for ((i=1; i<=fronts_count; i++)); do
+            local front_file=$(printf "${scan_dir}/front-%04d.pnm" ${i})
+            local final_front=$(printf "${scan_dir}/page-%04d.pnm" ${i})
+            [[ -f "${front_file}" ]] && mv "${front_file}" "${final_front}"
+        done
+        log info "Saved ${fronts_count} front page(s) only"
+        return 0
     fi
 
     if [[ ${fronts_count} -ne ${backs_count} ]]; then
@@ -220,17 +191,6 @@ do_scan_manual_duplex() {
     done
 
     log info "Interleaved $((fronts_count + backs_count)) pages"
-}
-
-# Scan dispatcher
-do_scan() {
-    local scan_dir="$1"
-
-    if [[ "${MANUAL_DUPLEX}" == "true" ]]; then
-        do_scan_manual_duplex "${scan_dir}"
-    else
-        do_scan_simple "${scan_dir}" "page"
-    fi
 }
 
 # Check if a page is blank (white)
@@ -301,13 +261,12 @@ assemble_pdf() {
     fi
 }
 
-# Upload file to FTP/FTPS/SFTP server
+# Upload file to FTP/FTPS/SFTP/SMB server
 upload_file() {
     local file_path="$1"
+    local temp_script=""
 
-    if [[ "${UPLOAD_ENABLED}" != "true" ]]; then
-        return 0
-    fi
+    [[ "${UPLOAD_ENABLED}" != "true" ]] && return 0
 
     if [[ ! -f "${file_path}" ]]; then
         log error "Upload failed: file not found: ${file_path}"
@@ -329,6 +288,7 @@ upload_file() {
             ftp)   port=21 ;;
             ftps)  port=21 ;;
             sftp)  port=22 ;;
+            smb)   port=445 ;;
             *)
                 log error "Unknown upload protocol: ${UPLOAD_PROTOCOL}"
                 return 1
@@ -336,7 +296,11 @@ upload_file() {
         esac
     fi
 
-    log info "Uploading ${filename} to ${UPLOAD_PROTOCOL}://${UPLOAD_HOST}:${port}${UPLOAD_PATH}"
+    if [[ "${UPLOAD_PROTOCOL}" == "smb" ]]; then
+        log info "Uploading ${filename} to ${UPLOAD_PROTOCOL}://${UPLOAD_HOST}/${UPLOAD_PATH}"
+    else
+        log info "Uploading ${filename} to ${UPLOAD_PROTOCOL}://${UPLOAD_HOST}:${port}${UPLOAD_PATH}"
+    fi
 
     # Build upload command based on protocol
     local upload_cmd
@@ -355,7 +319,6 @@ upload_file() {
 
         sftp)
             # Use lftp for SFTP (supports password authentication)
-            # Create temp script for lftp
             local temp_script
             temp_script=$(mktemp)
             cat > "${temp_script}" <<EOF
@@ -367,6 +330,30 @@ put ${file_path}
 bye
 EOF
             upload_cmd="lftp sftp://'${UPLOAD_USER}':'${UPLOAD_PASSWORD}'@'${UPLOAD_HOST}':'${port}' -f '${temp_script}'"
+            ;;
+
+        smb)
+            # Use smbclient for SMB/CIFS
+            # UPLOAD_PATH can be: "share" or "share/subfolder"
+            local share_path="${UPLOAD_PATH}"
+            local remote_dir=""
+
+            # Split share and directory if path contains /
+            if [[ "${share_path}" == */* ]]; then
+                local share_name="${share_path%%/*}"
+                remote_dir="${share_path#*/}"
+                share_path="${share_name}"
+            fi
+
+            # Build SMB path
+            local smb_path="//${UPLOAD_HOST}/${share_path}"
+
+            # Build smbclient command
+            if [[ -n "${remote_dir}" ]]; then
+                upload_cmd="smbclient '${smb_path}' -U '${UPLOAD_USER}%${UPLOAD_PASSWORD}' -p ${port} -c 'cd ${remote_dir}; put \"${file_path}\" \"${filename}\"'"
+            else
+                upload_cmd="smbclient '${smb_path}' -U '${UPLOAD_USER}%${UPLOAD_PASSWORD}' -p ${port} -c 'put \"${file_path}\" \"${filename}\"'"
+            fi
             ;;
 
         *)
@@ -409,11 +396,25 @@ main() {
 
     initialize_scanner
 
+    local last_scan_time=0
+    local adf_error_grace_period=60  # Ignore ADF errors for 60s after scan
+
     while true; do
+        local current_time=$(date +%s)
+        local time_since_scan=$((current_time - last_scan_time))
+
+        # Only check ADF if we're outside the grace period
+        # During grace period, only look for documents, not errors
         set +e
         check_adf
         local adf_result=$?
         set -e
+
+        # If we're in grace period and got an error, treat it as empty instead
+        if [[ ${time_since_scan} -lt ${adf_error_grace_period} ]] && [[ ${adf_result} -eq 2 ]]; then
+            log debug "Suppressing ADF error during ${adf_error_grace_period}s grace period (${time_since_scan}s after scan)"
+            adf_result=1  # Treat as empty
+        fi
 
         if [[ ${adf_result} -eq 0 ]]; then
             log info "Documents detected, scanning..."
@@ -423,7 +424,7 @@ main() {
             local scan_dir="${WORK_DIR}/${timestamp}"
             mkdir -p "${scan_dir}"
 
-            if do_scan "${scan_dir}"; then
+            if do_scan_manual_duplex "${scan_dir}"; then
                 local pdf_path
                 if pdf_path=$(assemble_pdf "${scan_dir}" "${timestamp}"); then
                     # Upload the PDF if enabled
@@ -434,8 +435,13 @@ main() {
             fi
 
             rm -rf "${scan_dir}"
+
+            # Set grace period start time to suppress false ADF errors
+            last_scan_time=$(date +%s)
         elif [[ ${adf_result} -eq 2 ]]; then
-            log warn "ADF error, waiting..."
+            # ADF error detected outside grace period
+            log error "ADF error: ${ADF_ERROR_STATE}"
+            log warn "ADF error detected - please press reset button on printer"
         fi
 
         sleep "${POLL_INTERVAL}"

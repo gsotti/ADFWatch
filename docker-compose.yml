@@ -6,27 +6,32 @@ services:
     container_name: adfwatch
     restart: unless-stopped
     network_mode: host
+    env_file:
+      - .env
     environment:
+      # Scanner Configuration
       - SCANNER_IP=192.168.1.94
-      - SCANNER_NAME=My Scanner  # Your scanner's display name
+      - SCANNER_NAME=My Scanner
+      # - SCAN_SOURCE=ADF  # Optional: force specific source (leave commented for auto-detect)
+
+      # Scan Settings
       - POLL_INTERVAL=5
       - SCAN_RESOLUTION=300
       - SCAN_MODE=Color
-      - DUPLEX_MODE=true
-      - DUPLEX_FLIP_DELAY=10
-      # - SCAN_EXTRA_OPTS=--duplex
+      - DUPLEX_FLIP_DELAY=10  # Seconds to wait for user to flip and reload backs
+      - SCAN_TIMEOUT=30  # Timeout in seconds between pages
       - BLANK_THRESHOLD=0.005
       - OUTPUT_DIR=/scans
       - LOG_LEVEL=info
 
-      # Upload settings (optional - set UPLOAD_ENABLED=true to enable)
+      # Upload Settings (optional - set UPLOAD_ENABLED=true to enable)
       - UPLOAD_ENABLED=false
-      - UPLOAD_PROTOCOL=sftp  # ftp, ftps, or sftp
+      - UPLOAD_PROTOCOL=sftp  # ftp, ftps, sftp, or smb
       # - UPLOAD_HOST=your-server.com
-      # - UPLOAD_PORT=22  # Optional, defaults: ftp=21, ftps=21, sftp=22
+      # - UPLOAD_PORT=22  # Optional, defaults: ftp=21, ftps=21, sftp=22, smb=445
       # - UPLOAD_USER=username
       # - UPLOAD_PASSWORD=password
-      # - UPLOAD_PATH=/scans  # Remote directory path
+      # - UPLOAD_PATH=/scans  # For FTP/SFTP: /remote/path | For SMB: sharename/subfolder
       # - UPLOAD_DELETE_AFTER=false  # Delete local file after successful upload
 
     volumes:

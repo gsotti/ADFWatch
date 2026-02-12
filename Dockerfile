@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xmlstarlet \
     lftp \
     openssh-client \
+    smbclient \
     && rm -rf /var/lib/apt/lists/*
 
 COPY airscan.conf /etc/sane.d/airscan.conf
