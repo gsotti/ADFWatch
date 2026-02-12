@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  adfwatch:
+    build: .
+    container_name: adfwatch
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    #environment:
+    #- SCANNER_IP=192.168.1.94
+    #- SCANNER_NAME=My Scanner # Your scanner's display name
+    #- POLL_INTERVAL=5
+    #- SCAN_RESOLUTION=300
+    #- SCAN_MODE=Color
+    #- DUPLEX_MODE=true
+    #- DUPLEX_FLIP_DELAY=10
+    #- BLANK_THRESHOLD=0.005
+    #- OUTPUT_DIR=/scans
+    #- LOG_LEVEL=info
+    #- SCAN_SOURCE=ADF
+
+    # Upload settings (optional - set UPLOAD_ENABLED=true to enable)
+    #- UPLOAD_ENABLED=false
+    #- UPLOAD_PROTOCOL=sftp # ftp, ftps, or sftp
+    # - UPLOAD_HOST=your-server.com
+    # - UPLOAD_PORT=22  # Optional, defaults: ftp=21, ftps=21, sftp=22
+    # - UPLOAD_USER=username
+    # - UPLOAD_PASSWORD=password
+    # - UPLOAD_PATH=/scans  # Remote directory path
+    # - UPLOAD_DELETE_AFTER=false  # Delete local file after successful upload
+
+    volumes:
+      - ./scans:/scans
