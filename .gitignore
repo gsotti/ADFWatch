@@ -1,0 +1,19 @@
+# Environment files
+.env
+
+# Scanned output
+scans/
+
+# Docker volumes
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
